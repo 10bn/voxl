@@ -156,7 +156,7 @@ function main() {
 			case 'status':
 				if (m.s === 'closed') {
 					app.desk.w = 0;
-					mic.stop();
+					mic.setup(false);
 					statusEl.style.display = '';
 					statusEl.textContent = 'Reconnecting…';
 				}

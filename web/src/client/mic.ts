@@ -7,6 +7,9 @@ const RATE = 48000;
 
 export function createMic(app: App) {
 	const btn = el<HTMLButtonElement>('mic-btn');
+	let wanted = true;
+	let available = false;
+	let starting: AbortController | null = null;
 	let on = false;
 	let stream: MediaStream | null = null;
 	let ctx: AudioContext | null = null;
@@ -17,15 +20,17 @@ export function createMic(app: App) {
 		btn.classList.toggle('on', on);
 		btn.setAttribute('aria-pressed', String(on));
 		if (!btn.classList.contains('err'))
-			btn.title = on ? 'Turn microphone off' : 'Turn microphone on';
+			btn.title = on || starting ? 'Turn microphone off' : 'Turn microphone on';
 		// While the mic is live the toolbar stays up as a recording indicator.
 		app.tools.classList.toggle('mic-on', on);
 	}
 
 	function setup(enabled: boolean) {
-		const available = enabled && !!navigator.mediaDevices?.getUserMedia;
+		const wasAvailable = available;
+		available = enabled && !!navigator.mediaDevices?.getUserMedia;
 		app.tools.classList.toggle('mic', available);
-		if (!available) stop();
+		if (!available) release();
+		else if (!wasAvailable && wanted) void start();
 	}
 
 	async function opusEncoder(): Promise<AudioEncoder | null> {
@@ -84,9 +89,13 @@ export function createMic(app: App) {
 	}
 
 	async function start() {
+		if (!available || starting || on) return;
+		const attempt = new AbortController();
+		starting = attempt;
 		btn.classList.remove('err');
+		show();
 		try {
-			stream = await navigator.mediaDevices.getUserMedia({
+			const capture = await navigator.mediaDevices.getUserMedia({
 				audio: {
 					channelCount: 1,
 					echoCancellation: true,
@@ -94,10 +103,22 @@ export function createMic(app: App) {
 					autoGainControl: true,
 				},
 			});
-			ctx = new AudioContext({ sampleRate: RATE, latencyHint: 'interactive' });
-			await ctx.audioWorklet.addModule('mic.js');
-			enc = await opusEncoder();
-			const node = new AudioWorkletNode(ctx, 'mic-capture', {
+			if (attempt.signal.aborted) {
+				capture.getTracks().forEach((track) => track.stop());
+				return;
+			}
+			stream = capture;
+			const context = new AudioContext({ sampleRate: RATE, latencyHint: 'interactive' });
+			ctx = context;
+			await context.audioWorklet.addModule('mic.js');
+			if (attempt.signal.aborted) return;
+			const encoder = await opusEncoder();
+			if (attempt.signal.aborted) {
+				encoder?.close();
+				return;
+			}
+			enc = encoder;
+			const node = new AudioWorkletNode(context, 'mic-capture', {
 				numberOfInputs: 1,
 				numberOfOutputs: 0,
 				channelCount: 1,
@@ -107,23 +128,29 @@ export function createMic(app: App) {
 				onChunk(e.data)
 			);
 			node.port.start();
-			ctx.createMediaStreamSource(stream).connect(node);
-			if (ctx.state !== 'running') await ctx.resume();
+			context.createMediaStreamSource(capture).connect(node);
+			if (context.state !== 'running') await context.resume();
+			if (attempt.signal.aborted) return;
 			on = true;
 			app.send(cmd.mic(true));
 		} catch (err) {
+			if (attempt.signal.aborted) return;
 			console.warn('[voxl] microphone unavailable', err);
-			stop();
+			release();
 			btn.classList.add('err');
 			btn.title =
 				err instanceof DOMException && err.name === 'NotAllowedError'
 					? 'Microphone access was blocked'
 					: 'No microphone available';
+		} finally {
+			if (starting === attempt) starting = null;
+			show();
 		}
-		show();
 	}
 
-	function stop() {
+	function release() {
+		starting?.abort();
+		starting = null;
 		if (on) app.send(cmd.mic(false));
 		on = false;
 		stream?.getTracks().forEach((t) => t.stop());
@@ -139,6 +166,23 @@ export function createMic(app: App) {
 		show();
 	}
 
-	btn.addEventListener('click', () => (on ? stop() : start()));
+	function stop() {
+		wanted = false;
+		release();
+	}
+
+	function resumeOnInteraction() {
+		if (ctx?.state === 'suspended') void ctx.resume().catch(() => {});
+	}
+
+	window.addEventListener('pointerup', resumeOnInteraction);
+	window.addEventListener('keydown', resumeOnInteraction);
+	btn.addEventListener('click', () => {
+		if (on || starting) stop();
+		else {
+			wanted = true;
+			void start();
+		}
+	});
 	return { setup, stop };
 }
