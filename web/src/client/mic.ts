@@ -108,7 +108,10 @@ export function createMic(app: App) {
 				return;
 			}
 			stream = capture;
-			const context = new AudioContext({ sampleRate: RATE, latencyHint: 'interactive' });
+			const context = new AudioContext({
+				sampleRate: RATE,
+				latencyHint: 'interactive',
+			});
 			ctx = context;
 			await context.audioWorklet.addModule('mic.js');
 			if (attempt.signal.aborted) return;
